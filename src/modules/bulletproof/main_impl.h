@@ -13,7 +13,55 @@
 #include "modules/rangeproof/main_impl.h"
 #include "modules/rangeproof/pedersen_impl.h"
 
+/* TODO parameterize circuits over arbitrary second generators */
+static const secp256k1_ge secp256k1_ge_const_g2 = SECP256K1_GE_CONST(
+    0, 0, 0, 0, 0, 0, 0, 1,
+    0x4218f20aUL, 0xe6c646b3UL, 0x63db6860UL, 0x5822fb14UL,
+    0x264ca8d2UL, 0x587fdd6fUL, 0xbc750d58UL, 0x7e76a7eeUL
+);
+
+typedef struct {
+    int special;
+    secp256k1_scalar scal;
+} secp256k1_fast_scalar;
+
+typedef struct {
+    size_t idx;
+    secp256k1_fast_scalar scal;
+} secp256k1_bulletproof_wmatrix_entry;
+
+typedef struct {
+    size_t size;
+    secp256k1_bulletproof_wmatrix_entry *entry;
+} secp256k1_bulletproof_wmatrix_row;
+
+struct secp256k1_bulletproof_circuit {
+    size_t n_gates; /* n */
+    size_t n_commits; /* m */
+    size_t n_constraints; /* Q */
+    size_t n_bits; /* number of implicit bit-constraints */
+    secp256k1_bulletproof_wmatrix_row *wl;
+    secp256k1_bulletproof_wmatrix_row *wr;
+    secp256k1_bulletproof_wmatrix_row *wo;
+    secp256k1_bulletproof_wmatrix_row *wv;
+    secp256k1_fast_scalar *c;
+
+    secp256k1_bulletproof_wmatrix_entry *entries;
+};
+
+struct secp256k1_bulletproof_circuit_assignment {
+    size_t n_gates;
+    size_t n_commits;
+    secp256k1_scalar *al;
+    secp256k1_scalar *ar;
+    secp256k1_scalar *ao;
+    secp256k1_scalar *v;
+};
+
+#include "modules/bulletproof/parser_impl.h"
 #include "modules/bulletproof/inner_product_impl.h"
+#include "modules/bulletproof/circuit_compress_impl.h"
+#include "modules/bulletproof/circuit_impl.h"
 #include "modules/bulletproof/rangeproof_impl.h"
 #include "modules/bulletproof/util.h"
 
@@ -185,6 +233,242 @@ int secp256k1_bulletproof_rangeproof_prove(const secp256k1_context* ctx, secp256
     ret = secp256k1_bulletproof_rangeproof_prove_impl(&ctx->ecmult_gen_ctx, &ctx->ecmult_ctx, scratch, proof, plen, nbits, value, blinds, commitp, n_commits, &genp, gens->gens, gens->n, nonce, extra_commit, extra_commit_len);
     secp256k1_scratch_deallocate_frame(scratch);
     return ret;
+}
+
+secp256k1_bulletproof_circuit *secp256k1_bulletproof_circuit_parse(const secp256k1_context *ctx, const char *description) {
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(description != NULL);
+    return secp256k1_parse_circuit(ctx, description);
+}
+
+int secp256k1_bulletproof_circuit_prove(const secp256k1_context* ctx, secp256k1_scratch_space *scratch, const secp256k1_bulletproof_generators *gens, const secp256k1_bulletproof_circuit *circ, unsigned char *proof, size_t *plen, const secp256k1_bulletproof_circuit_assignment *assn, const unsigned char *nonce, const unsigned char *extra_commit, size_t extra_commit_len) {
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(scratch != NULL);
+    ARG_CHECK(circ != NULL);
+    ARG_CHECK(gens != NULL);
+    ARG_CHECK(gens->n >= 2 * circ->n_gates);
+    ARG_CHECK(proof != NULL);
+    ARG_CHECK(plen != NULL);
+    ARG_CHECK(nonce != NULL);
+    ARG_CHECK(extra_commit != NULL || extra_commit_len == 0);
+
+    return secp256k1_bulletproof_relation66_prove_impl(
+        &ctx->ecmult_ctx,
+        scratch,
+        proof, plen,
+        assn,
+        NULL, NULL, 0,
+        &secp256k1_ge_const_g2,
+        circ,
+        gens->gens, gens->n,
+        nonce,
+        extra_commit, extra_commit_len
+    );
+}
+
+int secp256k1_bulletproof_circuit_verify(const secp256k1_context* ctx, secp256k1_scratch_space *scratch, const secp256k1_bulletproof_generators *gens, const secp256k1_bulletproof_circuit *circ, const unsigned char *proof, size_t plen, const unsigned char *extra_commit, size_t extra_commit_len) {
+
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(scratch != NULL);
+    ARG_CHECK(proof != NULL);
+    ARG_CHECK(circ != NULL);
+    ARG_CHECK(gens != NULL);
+    ARG_CHECK(gens->n >= 2 * circ->n_gates);
+    ARG_CHECK(extra_commit != NULL || extra_commit_len == 0);
+
+    return secp256k1_bulletproof_relation66_verify_impl(
+        &ctx->ecmult_ctx,
+        scratch,
+        &proof, 1, plen,
+        NULL, 0,
+        &secp256k1_ge_const_g2,
+        &circ,
+        gens->gens, gens->n,
+        extra_commit, extra_commit_len
+    );
+}
+
+int secp256k1_bulletproof_circuit_verify_multi(const secp256k1_context* ctx, secp256k1_scratch_space *scratch, const secp256k1_bulletproof_generators *gens, const secp256k1_bulletproof_circuit* const* circ, const unsigned char* const* proof, size_t n_proofs, size_t plen) {
+    size_t i;
+
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(scratch != NULL);
+    ARG_CHECK(proof != NULL);
+    ARG_CHECK(circ != NULL);
+    ARG_CHECK(gens != NULL);
+    ARG_CHECK(gens->n >= 2 * circ[0]->n_gates);
+
+    for (i = 1; i < n_proofs; i++) {
+        ARG_CHECK(circ[i]->n_gates == circ[0]->n_gates);
+    }
+
+    return secp256k1_bulletproof_relation66_verify_impl(
+        &ctx->ecmult_ctx,
+        scratch,
+        proof, n_proofs, plen,
+        NULL, 0,
+        &secp256k1_ge_const_g2,
+        circ,
+        gens->gens, gens->n,
+        NULL, 0
+    );
+}
+
+secp256k1_bulletproof_circuit *secp256k1_bulletproof_circuit_decode(const secp256k1_context *ctx, const char *fname) {
+    FILE *fh;
+    unsigned char buf[0x3f];
+    size_t n;
+    secp256k1_bulletproof_circuit *ret;
+
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(fname != NULL);
+
+    fh = fopen(fname, "rb");
+    if (fh == NULL) {
+        return NULL;
+    }
+
+    /* Read header and allocate memory */
+    if (secp256k1_bulletproof_circuit_allocate_memory(ctx, fh, &ret) != 1) {
+        fclose(fh);
+        return NULL;
+    }
+
+    /* Read matrices */
+    n = 0;
+    if (secp256k1_bulletproof_matrix_decode(fh, ret->wl, ret->entries, &n, ret->n_gates) != 1 ||
+        secp256k1_bulletproof_matrix_decode(fh, ret->wr, ret->entries, &n, ret->n_gates) != 1 ||
+        secp256k1_bulletproof_matrix_decode(fh, ret->wo, ret->entries, &n, ret->n_gates) != 1 ||
+        secp256k1_bulletproof_matrix_decode(fh, ret->wv, ret->entries, &n, ret->n_commits) != 1) {
+        goto fail;
+    }
+
+    /* Read C */
+    for (n = 0; n < ret->n_constraints; n++) {
+        if (fread(buf, 1, 1, fh) != 1 ||
+            ((buf[0] & 0x3f) > 0 && fread(buf + 1, buf[0] & 0x3f, 1, fh) != 1) ||
+            secp256k1_scalar_decode(&ret->c[n], buf) != 1) {
+            goto fail;
+        }
+    }
+
+    fclose(fh);
+    return ret;
+
+fail:
+    fclose(fh);
+    if (ret != NULL) {
+        free(ret->entries);
+        free(ret->wl);
+        free(ret->c);
+        free(ret);
+    }
+    return NULL;
+}
+
+secp256k1_bulletproof_circuit_assignment *secp256k1_bulletproof_circuit_assignment_decode(const secp256k1_context *ctx, const char *fname) {
+    FILE *fh;
+    unsigned char buf[33];
+    secp256k1_bulletproof_circuit_assignment *ret = NULL;
+    size_t version;
+    size_t n_gates;
+    size_t n_commits;
+    size_t total_mem;
+    size_t i;
+
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(fname != NULL);
+
+    fh = fopen(fname, "rb");
+    if (fh == NULL) {
+        return NULL;
+    }
+
+    if (fread(buf, 16, 1, fh) != 1) {
+        goto fail;
+    }
+
+    version = secp256k1_decode(&buf[0], 4);  /* read version and flags as one word */
+    if (version != SECP256K1_BULLETPROOF_CIRCUIT_VERSION) {
+        goto fail;
+    }
+    n_commits = secp256k1_decode(&buf[4], 4);
+    n_gates = secp256k1_decode(&buf[8], 8);
+
+    /* Number of c entries is implied by n_constraints */
+    total_mem = sizeof(*ret) + (3 * n_gates + n_commits) * sizeof(*ret->al);
+    if (total_mem > SECP256K1_BULLETPROOF_MAX_CIRCUIT) {
+        goto fail;
+    }
+
+    ret = (secp256k1_bulletproof_circuit_assignment *)checked_malloc(&ctx->error_callback, sizeof(*ret));
+    if (ret == NULL) {
+        goto fail;
+    }
+    ret->al = (secp256k1_scalar *)checked_malloc(&ctx->error_callback, (3 * n_gates + n_commits) * sizeof(*ret->al));
+    if (ret->al == NULL) {
+        goto fail;
+    }
+    ret->ar = &ret->al[1 * n_gates];
+    ret->ao = &ret->al[2 * n_gates];
+    ret->v = &ret->al[3 * n_gates];
+    ret->n_gates = n_gates;
+    ret->n_commits = n_commits;
+
+    /* Because al, ar, ao and v are contiguous in memory we can just read them all in one loop */
+    for (i = 0; i < 3 * n_gates + n_commits; i++) {
+        size_t j;
+        int overflow;
+
+        memset(buf, 0, 33);
+        if (fread(buf, 1, 1, fh) != 1 ||
+            ((buf[0] & 0x3f) > 0 && fread(buf + 1, buf[0] & 0x3f, 1, fh) != 1)) {
+            goto fail;
+        }
+
+        for (j = 0; j < 16; j++) {
+            unsigned char tmp = buf[j + 1];
+            buf[j + 1] = buf[32 - j];
+            buf[32 - j] = tmp;
+        }
+        secp256k1_scalar_set_b32(&ret->al[i], buf + 1, &overflow);
+        if (overflow) {
+            goto fail;
+        }
+        if (buf[0] & 0x80) {
+            secp256k1_scalar_negate(&ret->al[i], &ret->al[i]);
+        }
+    }
+
+    fclose(fh);
+    return ret;
+
+fail:
+    fclose(fh);
+    if (ret != NULL) {
+        free(ret->al);
+        free(ret);
+    }
+    return NULL;
+}
+
+
+void secp256k1_bulletproof_circuit_destroy(const secp256k1_context *ctx, secp256k1_bulletproof_circuit *circ) {
+    VERIFY_CHECK(ctx != NULL);
+    if (circ != NULL) {
+        free(circ->entries);
+        free(circ->wl);
+        free(circ->c);
+        free(circ);
+    }
+}
+
+void secp256k1_bulletproof_circuit_assignment_destroy(const secp256k1_context *ctx, secp256k1_bulletproof_circuit_assignment *assn) {
+    (void) ctx;
+    if (assn != NULL) {
+        free(assn->al);
+        free(assn);
+    }
 }
 
 #endif
