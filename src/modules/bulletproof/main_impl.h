@@ -13,6 +13,8 @@
 #include "modules/rangeproof/main_impl.h"
 #include "modules/rangeproof/pedersen_impl.h"
 
+#define N_PRECOMP	8
+
 /* TODO parameterize circuits over arbitrary second generators */
 static const secp256k1_ge secp256k1_ge_const_g2 = SECP256K1_GE_CONST(
     0, 0, 0, 0, 0, 0, 0, 1,
@@ -81,7 +83,7 @@ secp256k1_bulletproof_generators *secp256k1_bulletproof_generators_create(const 
 
     VERIFY_CHECK(ctx != NULL);
 
-    ret->gens = (secp256k1_ge *)checked_malloc(&ctx->error_callback, n * sizeof(*ret->gens));
+    ret->gens = (secp256k1_ge *)checked_malloc(&ctx->error_callback, N_PRECOMP * n * sizeof(*ret->gens));
     ret->n = n;
     if (ret->gens == NULL) {
         free(ret);
@@ -93,11 +95,22 @@ secp256k1_bulletproof_generators *secp256k1_bulletproof_generators_create(const 
 
     secp256k1_rfc6979_hmac_sha256_initialize(&rng, seed, 64);
     for (i = 0; i < n; i++) {
+        size_t j;
         unsigned char tmp[32] = { 0 };
         secp256k1_generator gen;
+        secp256k1_gej precompj;
         secp256k1_rfc6979_hmac_sha256_generate(&rng, tmp, 32);
         CHECK(secp256k1_generator_generate(ctx, &gen, tmp));
         secp256k1_generator_load(&ret->gens[i], &gen);
+
+        secp256k1_gej_set_ge(&precompj, &ret->gens[i]);
+        for (j = 1; j < N_PRECOMP; j++) {
+            size_t k;
+            for (k = 0; k < 256 / N_PRECOMP; k++) {
+                secp256k1_gej_double_var(&precompj, &precompj, NULL);
+            }
+            secp256k1_ge_set_gej(&ret->gens[i + n*j], &precompj);
+        }
     }
     return ret;
 }

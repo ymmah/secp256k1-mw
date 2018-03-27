@@ -659,20 +659,8 @@ void run_bulletproof_tests(void) {
 
     /* Make a ton of generators */
     size_t n_gens = 32768;
-    secp256k1_ge *gens = (secp256k1_ge *)checked_malloc(&ctx->error_callback, sizeof(secp256k1_ge) * n_gens);
-    for (i = 0; i < n_gens; i++) {
-       secp256k1_generator tmpgen;
-       unsigned char commit[32] = { 0 };
-       commit[0] = i;
-       commit[1] = i >> 8;
-       commit[2] = i >> 16;
-       commit[3] = i >> 24;
-
-       commit[31] = 'G';
-       commit[30] = 'H';
-       CHECK(secp256k1_generator_generate(ctx, &tmpgen, commit));
-       secp256k1_generator_load(&gens[i], &tmpgen);
-    }
+    secp256k1_bulletproof_generators *sgens = secp256k1_bulletproof_generators_create(ctx, n_gens);
+    secp256k1_ge *gens = sgens->gens;
 
     test_bulletproof_api();
 
@@ -706,7 +694,7 @@ void run_bulletproof_tests(void) {
 
     test_bulletproof_circuit(gens, n_gens);
 
-    free(gens);
+    secp256k1_bulletproof_generators_destroy(ctx, sgens);
 }
 #undef MAX_WIDTH
 

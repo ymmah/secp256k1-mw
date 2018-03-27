@@ -49,9 +49,11 @@ typedef struct {
     const secp256k1_ge *geng;
     const secp256k1_ge *genh;
     size_t vec_len;
+    size_t n_gens;
     size_t floor_lg_gens;
     secp256k1_scalar *randomizer;
     secp256k1_bulletproof_innerproduct_vfy_data *proof;
+    secp256k1_scalar cache[N_PRECOMP];
 } secp256k1_bulletproof_innerproduct_vfy_ecmult_context;
 
 size_t secp256k1_bulletproof_innerproduct_proof_length(size_t n) {
@@ -125,8 +127,27 @@ size_t secp256k1_bulletproof_innerproduct_proof_length(size_t n) {
 static int secp256k1_bulletproof_innerproduct_vfy_ecmult_callback(secp256k1_scalar *sc, secp256k1_ge *pt, size_t idx, void *data) {
     secp256k1_bulletproof_innerproduct_vfy_ecmult_context *ctx = (secp256k1_bulletproof_innerproduct_vfy_ecmult_context *) data;
 
+    if (idx < 2 * N_PRECOMP * ctx->vec_len) {
+        if (idx % N_PRECOMP == 0) {
+            idx /= N_PRECOMP;
+        } else {
+            size_t real_idx = idx / N_PRECOMP;
+            *sc = ctx->cache[idx % N_PRECOMP];
+            if (real_idx< ctx->vec_len) {
+                *pt = ctx->geng[real_idx + ctx->n_gens * (idx % N_PRECOMP)];
+            } else {
+                real_idx -= ctx->vec_len;
+                *pt = ctx->genh[real_idx + ctx->n_gens * (idx % N_PRECOMP)];
+            }
+            return 1;
+        }
+    } else {
+        idx -= (2 * (N_PRECOMP - 1) * ctx->vec_len);
+    }
+
     /* First 2N points use the standard Gi, Hi generators, and the scalars can be aggregated across proofs  */
     if (idx < 2 * ctx->vec_len) {
+        unsigned char sc_buf[32] = {0};
         const size_t grouping = ctx->vec_len < IP_AB_SCALARS / 2 ? ctx->vec_len : IP_AB_SCALARS / 2;
         const size_t lg_grouping = secp256k1_floor_lg(grouping);
         size_t i;
@@ -197,6 +218,15 @@ static int secp256k1_bulletproof_innerproduct_vfy_ecmult_callback(secp256k1_scal
 
             secp256k1_scalar_add(sc, sc, &term);
         }
+        /* Do precomp */
+        secp256k1_scalar_get_b32(sc_buf, sc);
+        for (i = 0; i < N_PRECOMP; i++) {
+            unsigned char buf[32] = {0};
+            int overflow;
+            memcpy(&buf[32 - 32/N_PRECOMP], &sc_buf[32 - (i+1) * 32/N_PRECOMP], 32/N_PRECOMP);
+            secp256k1_scalar_set_b32(&ctx->cache[i], buf, &overflow);
+        }
+        *sc = ctx->cache[0];
     /* Next 2lgN points are the L and R vectors */
     } else if (idx < 2 * (ctx->vec_len + ctx->floor_lg_gens * ctx->n_proofs)) {
         size_t real_idx = idx - 2 * ctx->vec_len;
@@ -250,7 +280,7 @@ static int secp256k1_bulletproof_inner_product_verify_impl(const secp256k1_ecmul
     secp256k1_sha256 sha256;
     secp256k1_bulletproof_innerproduct_vfy_ecmult_context ecmult_data;
     unsigned char commit[32];
-    size_t total_n_points = 2 * vec_len + 1; /* +1 for shared G */
+    size_t total_n_points = 2 * vec_len * N_PRECOMP + 1; /* +1 for shared G */
     secp256k1_gej r;
     secp256k1_scalar p_offs;
     size_t i;
@@ -270,6 +300,7 @@ static int secp256k1_bulletproof_inner_product_verify_impl(const secp256k1_ecmul
     ecmult_data.n_proofs = n_proofs;
     ecmult_data.geng = gens;
     ecmult_data.genh = gens + n_gens / 2;
+    ecmult_data.n_gens = n_gens;
     ecmult_data.vec_len = vec_len;
     ecmult_data.floor_lg_gens = secp256k1_floor_lg(2 * vec_len / IP_AB_SCALARS);
     ecmult_data.randomizer = (secp256k1_scalar *)secp256k1_scratch_alloc(scratch, n_proofs * sizeof(*ecmult_data.randomizer));
